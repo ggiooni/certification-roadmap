@@ -82,6 +82,8 @@ const TOTAL_HOURS = CERTIFICATIONS.reduce((sum, c) => sum + c.steps.reduce((s2, 
 // ── Storage helpers ─────────────────────────────────────────────────
 const STORAGE_KEY = 'cert-roadmap-v1'
 const STREAK_KEY = 'cert-roadmap-streak'
+const TAB_KEY = 'cert-roadmap-tab'
+const PLANNER_KEY_PREFIX = 'cert-planner-'
 
 function loadState() {
   try {
@@ -107,6 +109,22 @@ function saveStreak(streak) {
   localStorage.setItem(STREAK_KEY, JSON.stringify(streak))
 }
 
+function loadTab() {
+  try { return localStorage.getItem(TAB_KEY) || 'certs' } catch { return 'certs' }
+}
+
+function loadPlannerData(weekKey) {
+  try {
+    const raw = localStorage.getItem(PLANNER_KEY_PREFIX + weekKey)
+    if (!raw) return { workShifts: {}, workouts: {}, confirmedStudy: [] }
+    return JSON.parse(raw)
+  } catch { return { workShifts: {}, workouts: {}, confirmedStudy: [] } }
+}
+
+function savePlannerData(weekKey, data) {
+  localStorage.setItem(PLANNER_KEY_PREFIX + weekKey, JSON.stringify(data))
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────
 function today() {
   return new Date().toISOString().slice(0, 10)
@@ -125,7 +143,6 @@ function daysUntil(iso) {
 
 function googleCalendarUrl(title, dateIso) {
   const start = dateIso.replace(/-/g, '')
-  // 2-hour study block starting at 10am
   const dtStart = start + 'T100000'
   const dtEnd = start + 'T120000'
   const params = new URLSearchParams({
@@ -147,6 +164,99 @@ function getNextDeadline(cert, checked) {
   const pending = cert.steps.filter(s => !checked[s.id])
   if (!pending.length) return null
   return pending.reduce((a, b) => a.dueDate < b.dueDate ? a : b)
+}
+
+// ── Week helpers ────────────────────────────────────────────────────
+function getWeekKey(date) {
+  const d = new Date(date)
+  const jan1 = new Date(d.getFullYear(), 0, 1)
+  const dayOfYear = Math.floor((d - jan1) / 86400000) + 1
+  const weekNum = Math.ceil((dayOfYear + jan1.getDay()) / 7)
+  return `${d.getFullYear()}-W${String(weekNum).padStart(2, '0')}`
+}
+
+function getWeekDates(refDate) {
+  const d = new Date(refDate)
+  const day = d.getDay()
+  const diff = day === 0 ? -6 : 1 - day // Monday as start
+  const monday = new Date(d)
+  monday.setDate(d.getDate() + diff)
+  const dates = []
+  for (let i = 0; i < 7; i++) {
+    const dd = new Date(monday)
+    dd.setDate(monday.getDate() + i)
+    dates.push(dd)
+  }
+  return dates
+}
+
+function formatShortDate(date) {
+  return date.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })
+}
+
+const DAY_NAMES = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
+const HOURS = Array.from({ length: 16 }, (_, i) => i + 7) // 7:00 to 22:00
+
+// ── Fixed schedule blocks ───────────────────────────────────────────
+const FIXED_BLOCKS = [
+  // Monday
+  { day: 0, start: 10, end: 11.5, label: 'Gym', type: 'sport' },
+  { day: 0, start: 13, end: 16.5, label: 'Clases Dorset', type: 'class' },
+  // Tuesday
+  { day: 1, start: 9, end: 16.5, label: 'Clases Dorset', type: 'class' },
+  // Wednesday
+  { day: 2, start: 13, end: 16.5, label: 'Clases Dorset', type: 'class' },
+  { day: 2, start: 19.5, end: 21, label: 'Climbing', type: 'sport' },
+  // Thursday
+  { day: 3, start: 7, end: 9, label: 'Fútbol', type: 'sport' },
+  { day: 3, start: 9, end: 13, label: 'Clases Dorset', type: 'class' },
+]
+
+const WORKOUT_SLOTS = [
+  { id: 'gym-mon', day: 0, label: 'Gym', time: '10:00–11:30' },
+  { id: 'climb-wed', day: 2, label: 'Climbing', time: '19:30–21:00' },
+  { id: 'futbol-thu', day: 3, label: 'Fútbol', time: '7:00–9:00' },
+]
+
+const BLOCK_COLORS = {
+  class: '#3B82F6',
+  sport: '#22C55E',
+  work: '#F59E0B',
+  study: '#8B5CF6',
+}
+
+// ── Google Calendar Config ─────────────────────────────────────────
+const GCAL_SCOPES = 'https://www.googleapis.com/auth/calendar.events'
+const GCAL_DISCOVERY = 'https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest'
+const GCAL_CALENDAR_ID = 'e5e04e99051b8a3cf2cd0100cc98abbd59ebbdf8b4b5fe9011f3d848ca7b50e7@group.calendar.google.com'
+const GCAL_CREDS_KEY = 'cert-roadmap-gcal-creds'
+
+// Reminder config per block type (minutes before)
+const GCAL_REMINDERS = {
+  class: [{ method: 'popup', minutes: 30 }],
+  sport: [{ method: 'popup', minutes: 60 }, { method: 'popup', minutes: 10 }],
+  work: [{ method: 'popup', minutes: 15 }],
+  study: [{ method: 'popup', minutes: 30 }],
+}
+
+// Google Calendar color IDs (1-11)
+const GCAL_COLOR_MAP = {
+  class: '9',    // Blueberry
+  sport: '10',   // Basil (green)
+  work: '5',     // Banana (yellow)
+  study: '3',    // Grape (purple)
+}
+
+function loadGCalCreds() {
+  try {
+    const raw = localStorage.getItem(GCAL_CREDS_KEY)
+    if (!raw) return { clientId: '', apiKey: '' }
+    return JSON.parse(raw)
+  } catch { return { clientId: '', apiKey: '' } }
+}
+
+function saveGCalCreds(creds) {
+  localStorage.setItem(GCAL_CREDS_KEY, JSON.stringify(creds))
 }
 
 // ── Styles ──────────────────────────────────────────────────────────
@@ -409,6 +519,24 @@ const S = {
     textAlign: 'center',
     outline: 'none',
   },
+  // Tab styles
+  tabBar: {
+    display: 'flex',
+    gap: 0,
+    marginBottom: 28,
+    borderBottom: '1px solid #27272A',
+  },
+  tab: (isActive) => ({
+    background: 'none',
+    border: 'none',
+    borderBottom: isActive ? '2px solid #FAFAFA' : '2px solid transparent',
+    color: isActive ? '#FAFAFA' : '#71717A',
+    fontSize: 14,
+    fontWeight: 600,
+    padding: '10px 20px',
+    cursor: 'pointer',
+    transition: 'all 0.15s',
+  }),
 }
 
 // ── Components ──────────────────────────────────────────────────────
@@ -530,7 +658,6 @@ function PhaseCard({ cert, checked, notes, onToggle, onNote, defaultExpanded }) 
 }
 
 function Timeline({ checked }) {
-  // Timeline from Apr 2026 to Mar 2027 = 12 months
   const months = ['Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic', 'Ene', 'Feb', 'Mar']
   const now = new Date()
   const currentMonth = now.getFullYear() === 2026 ? now.getMonth() - 3 :
@@ -557,12 +684,801 @@ function Timeline({ checked }) {
   )
 }
 
+// ── Google Calendar Sync Component ─────────────────────────────────
+
+function GoogleCalendarSync({ allBlocks, weekDates, weekKey }) {
+  const [creds, setCreds] = useState(loadGCalCreds)
+  const [gapiReady, setGapiReady] = useState(false)
+  const [isAuthorized, setIsAuthorized] = useState(false)
+  const [tokenClient, setTokenClient] = useState(null)
+  const [syncStatus, setSyncStatus] = useState(null) // null | 'syncing' | { created: N } | { error: msg }
+  const [showSetup, setShowSetup] = useState(false)
+
+  const hasCredentials = creds.clientId && creds.apiKey
+
+  // Init gapi + GIS when credentials are set
+  useEffect(() => {
+    if (!hasCredentials) return
+
+    let cancelled = false
+
+    const initGapi = () => {
+      if (!window.gapi) {
+        setTimeout(initGapi, 200)
+        return
+      }
+      window.gapi.load('client', async () => {
+        try {
+          await window.gapi.client.init({
+            apiKey: creds.apiKey,
+            discoveryDocs: [GCAL_DISCOVERY],
+          })
+          if (!cancelled) setGapiReady(true)
+        } catch (err) {
+          console.error('gapi init error:', err)
+        }
+      })
+    }
+
+    const initGis = () => {
+      if (!window.google?.accounts?.oauth2) {
+        setTimeout(initGis, 200)
+        return
+      }
+      const tc = window.google.accounts.oauth2.initTokenClient({
+        client_id: creds.clientId,
+        scope: GCAL_SCOPES,
+        callback: (response) => {
+          if (response.error) {
+            console.error('OAuth error:', response)
+            return
+          }
+          setIsAuthorized(true)
+        },
+      })
+      if (!cancelled) setTokenClient(tc)
+    }
+
+    initGapi()
+    initGis()
+
+    return () => { cancelled = true }
+  }, [hasCredentials, creds.clientId, creds.apiKey])
+
+  const handleAuth = () => {
+    if (!tokenClient) return
+    tokenClient.requestAccessToken()
+  }
+
+  const handleDisconnect = () => {
+    const token = window.gapi.client.getToken()
+    if (token) {
+      window.google.accounts.oauth2.revoke(token.access_token)
+      window.gapi.client.setToken(null)
+    }
+    setIsAuthorized(false)
+  }
+
+  const handleSync = async () => {
+    if (!gapiReady || !isAuthorized) return
+    setSyncStatus('syncing')
+
+    try {
+      let created = 0
+      for (const block of allBlocks) {
+        const date = weekDates[block.day]
+        if (!date) continue
+
+        const startHour = Math.floor(block.start)
+        const startMin = Math.round((block.start - startHour) * 60)
+        const endHour = Math.floor(block.end)
+        const endMin = Math.round((block.end - endHour) * 60)
+
+        const startDt = new Date(date)
+        startDt.setHours(startHour, startMin, 0, 0)
+        const endDt = new Date(date)
+        endDt.setHours(endHour, endMin, 0, 0)
+
+        const event = {
+          summary: block.label,
+          start: {
+            dateTime: startDt.toISOString(),
+            timeZone: 'Europe/Dublin',
+          },
+          end: {
+            dateTime: endDt.toISOString(),
+            timeZone: 'Europe/Dublin',
+          },
+          reminders: {
+            useDefault: false,
+            overrides: GCAL_REMINDERS[block.type] || [{ method: 'popup', minutes: 30 }],
+          },
+          colorId: GCAL_COLOR_MAP[block.type] || '1',
+        }
+
+        await window.gapi.client.calendar.events.insert({
+          calendarId: GCAL_CALENDAR_ID,
+          resource: event,
+        })
+        created++
+      }
+      setSyncStatus({ created })
+    } catch (err) {
+      console.error('Sync error:', err)
+      const msg = err?.result?.error?.message || err.message || 'Error desconocido'
+      setSyncStatus({ error: msg })
+    }
+  }
+
+  const updateCred = (key, value) => {
+    const updated = { ...creds, [key]: value }
+    setCreds(updated)
+    saveGCalCreds(updated)
+  }
+
+  // Setup instructions panel
+  if (!hasCredentials) {
+    return (
+      <div style={{
+        background: '#18181B',
+        border: '1px solid #27272A',
+        borderRadius: 10,
+        padding: '14px 16px',
+        marginBottom: 16,
+        borderLeft: '3px solid #3B82F6',
+      }}>
+        <div
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
+          onClick={() => setShowSetup(!showSetup)}
+        >
+          <span style={{ fontSize: 14, fontWeight: 600, color: '#FAFAFA' }}>
+            Google Calendar — Configurar
+          </span>
+          <span style={{ fontSize: 12, color: '#71717A' }}>{showSetup ? '▲' : '▼'}</span>
+        </div>
+        {showSetup && (
+          <div style={{ marginTop: 12 }}>
+            <ol style={{ fontSize: 12, color: '#A1A1AA', paddingLeft: 20, margin: '0 0 12px', lineHeight: 1.8 }}>
+              <li>Ir a <a href="https://console.cloud.google.com" target="_blank" rel="noreferrer" style={{ color: '#3B82F6' }}>Google Cloud Console</a></li>
+              <li>Crear un proyecto nuevo (o usar uno existente)</li>
+              <li>Habilitar <strong>Google Calendar API</strong> en APIs & Services</li>
+              <li>Crear <strong>OAuth 2.0 Client ID</strong> (Web app, origin: <code style={{ background: '#27272A', padding: '1px 4px', borderRadius: 3 }}>http://localhost:5173</code>)</li>
+              <li>Crear <strong>API Key</strong> en Credentials</li>
+              <li>Pegar ambos abajo:</li>
+            </ol>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <input
+                placeholder="Client ID (ej: 123...apps.googleusercontent.com)"
+                value={creds.clientId}
+                onChange={(e) => updateCred('clientId', e.target.value.trim())}
+                style={{
+                  background: '#0F0F11', border: '1px solid #27272A', borderRadius: 6,
+                  color: '#FAFAFA', fontSize: 12, padding: '8px 10px', outline: 'none', width: '100%',
+                  boxSizing: 'border-box',
+                }}
+              />
+              <input
+                placeholder="API Key (ej: AIza...)"
+                value={creds.apiKey}
+                onChange={(e) => updateCred('apiKey', e.target.value.trim())}
+                style={{
+                  background: '#0F0F11', border: '1px solid #27272A', borderRadius: 6,
+                  color: '#FAFAFA', fontSize: 12, padding: '8px 10px', outline: 'none', width: '100%',
+                  boxSizing: 'border-box',
+                }}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // Authorized / sync UI
+  return (
+    <div style={{
+      background: '#18181B',
+      border: '1px solid #27272A',
+      borderRadius: 10,
+      padding: '14px 16px',
+      marginBottom: 16,
+      borderLeft: '3px solid #3B82F6',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: '#FAFAFA' }}>
+          Google Calendar
+        </span>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {!isAuthorized ? (
+            <button
+              style={{
+                ...S.btn('#3B82F6', '#fff'),
+                opacity: gapiReady ? 1 : 0.5,
+              }}
+              onClick={handleAuth}
+              disabled={!gapiReady}
+            >
+              {gapiReady ? 'Conectar con Google' : 'Cargando...'}
+            </button>
+          ) : (
+            <>
+              <button
+                style={S.btn('#22C55E', '#000')}
+                onClick={handleSync}
+                disabled={syncStatus === 'syncing'}
+              >
+                {syncStatus === 'syncing' ? 'Sincronizando...' : `Sincronizar semana (${allBlocks.length} bloques)`}
+              </button>
+              <button
+                style={S.btn('#27272A', '#71717A')}
+                onClick={handleDisconnect}
+              >
+                Desconectar
+              </button>
+            </>
+          )}
+          <button
+            style={S.btn('#27272A', '#71717A')}
+            onClick={() => {
+              if (confirm('¿Borrar credenciales de Google Calendar?')) {
+                updateCred('clientId', '')
+                updateCred('apiKey', '')
+                setIsAuthorized(false)
+              }
+            }}
+            title="Cambiar credenciales"
+          >
+            ⚙
+          </button>
+        </div>
+      </div>
+      {/* Status messages */}
+      {syncStatus && syncStatus !== 'syncing' && (
+        <div style={{
+          marginTop: 8,
+          fontSize: 12,
+          padding: '6px 10px',
+          borderRadius: 6,
+          background: syncStatus.error ? 'rgba(239,68,68,0.1)' : 'rgba(34,197,94,0.1)',
+          color: syncStatus.error ? '#EF4444' : '#22C55E',
+          border: `1px solid ${syncStatus.error ? 'rgba(239,68,68,0.3)' : 'rgba(34,197,94,0.3)'}`,
+        }}>
+          {syncStatus.error
+            ? `Error: ${syncStatus.error}`
+            : `${syncStatus.created} evento${syncStatus.created !== 1 ? 's' : ''} creado${syncStatus.created !== 1 ? 's' : ''} en Google Calendar`}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Weekly Planner Component ────────────────────────────────────────
+
+function WeeklyPlanner() {
+  const [weekOffset, setWeekOffset] = useState(0)
+  const [currentTime, setCurrentTime] = useState(new Date())
+
+  const refDate = useMemo(() => {
+    const d = new Date()
+    d.setDate(d.getDate() + weekOffset * 7)
+    return d
+  }, [weekOffset])
+
+  const weekDates = useMemo(() => getWeekDates(refDate), [refDate])
+  const weekKey = useMemo(() => getWeekKey(weekDates[0]), [weekDates])
+
+  const [plannerData, setPlannerData] = useState(() => loadPlannerData(weekKey))
+
+  // Reload data when week changes
+  useEffect(() => {
+    setPlannerData(loadPlannerData(weekKey))
+  }, [weekKey])
+
+  // Persist data
+  useEffect(() => {
+    savePlannerData(weekKey, plannerData)
+  }, [weekKey, plannerData])
+
+  // Update current time every minute
+  useEffect(() => {
+    const interval = setInterval(() => setCurrentTime(new Date()), 60000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const { workShifts, workouts, confirmedStudy } = plannerData
+
+  // Work shift input state
+  const [shiftDay, setShiftDay] = useState(4) // Friday default
+  const [shiftStart, setShiftStart] = useState('09:00')
+  const [shiftEnd, setShiftEnd] = useState('17:00')
+
+  const addWorkShift = () => {
+    const startH = parseFloat(shiftStart.split(':')[0]) + parseFloat(shiftStart.split(':')[1]) / 60
+    const endH = parseFloat(shiftEnd.split(':')[0]) + parseFloat(shiftEnd.split(':')[1]) / 60
+    if (endH <= startH) return
+    const dayShifts = workShifts[shiftDay] || []
+    setPlannerData(prev => ({
+      ...prev,
+      workShifts: {
+        ...prev.workShifts,
+        [shiftDay]: [...dayShifts, { start: startH, end: endH, label: 'Biximply' }]
+      }
+    }))
+  }
+
+  const removeWorkShift = (dayIdx, shiftIdx) => {
+    setPlannerData(prev => {
+      const dayShifts = [...(prev.workShifts[dayIdx] || [])]
+      dayShifts.splice(shiftIdx, 1)
+      return {
+        ...prev,
+        workShifts: { ...prev.workShifts, [dayIdx]: dayShifts }
+      }
+    })
+  }
+
+  const toggleWorkout = (id) => {
+    setPlannerData(prev => ({
+      ...prev,
+      workouts: { ...prev.workouts, [id]: !prev.workouts[id] }
+    }))
+  }
+
+  const workoutsDone = WORKOUT_SLOTS.filter(w => workouts[w.id]).length
+
+  // Collect all blocks for the grid
+  const getAllBlocks = useCallback(() => {
+    const blocks = []
+
+    // Fixed blocks
+    FIXED_BLOCKS.forEach(b => {
+      blocks.push({ ...b })
+    })
+
+    // Work shifts
+    Object.entries(workShifts).forEach(([dayStr, shifts]) => {
+      const day = parseInt(dayStr)
+      shifts.forEach((shift, idx) => {
+        blocks.push({
+          day,
+          start: shift.start,
+          end: shift.end,
+          label: shift.label,
+          type: 'work',
+          shiftIdx: idx,
+        })
+      })
+    })
+
+    // Confirmed study blocks
+    confirmedStudy.forEach(b => {
+      blocks.push({ day: b.day, start: b.start, end: b.end, label: 'Estudio', type: 'study' })
+    })
+
+    return blocks
+  }, [workShifts, confirmedStudy])
+
+  // Find free gaps >= 1.5h for study suggestions
+  const studySuggestions = useMemo(() => {
+    const allBlocks = getAllBlocks()
+    const suggestions = []
+
+    for (let day = 0; day < 7; day++) {
+      const dayBlocks = allBlocks
+        .filter(b => b.day === day)
+        .sort((a, b) => a.start - b.start)
+
+      let cursor = 7 // Start at 7:00
+      for (const block of dayBlocks) {
+        const gap = block.start - cursor
+        if (gap >= 1.5) {
+          // Check if this suggestion is already confirmed
+          const isConfirmed = confirmedStudy.some(
+            s => s.day === day && s.start === cursor && s.end === cursor + Math.min(gap, 2)
+          )
+          if (!isConfirmed) {
+            suggestions.push({
+              day,
+              start: cursor,
+              end: cursor + Math.min(gap, 2), // Max 2h blocks
+              label: 'Estudio sugerido',
+            })
+          }
+        }
+        cursor = Math.max(cursor, block.end)
+      }
+      // Check gap after last block until 22:00
+      const gap = 22 - cursor
+      if (gap >= 1.5) {
+        const isConfirmed = confirmedStudy.some(
+          s => s.day === day && s.start === cursor && s.end === cursor + Math.min(gap, 2)
+        )
+        if (!isConfirmed) {
+          suggestions.push({
+            day,
+            start: cursor,
+            end: cursor + Math.min(gap, 2),
+            label: 'Estudio sugerido',
+          })
+        }
+      }
+    }
+    return suggestions
+  }, [getAllBlocks, confirmedStudy])
+
+  const confirmStudyBlock = (suggestion) => {
+    setPlannerData(prev => ({
+      ...prev,
+      confirmedStudy: [...prev.confirmedStudy, { day: suggestion.day, start: suggestion.start, end: suggestion.end }]
+    }))
+  }
+
+  const removeStudyBlock = (idx) => {
+    setPlannerData(prev => ({
+      ...prev,
+      confirmedStudy: prev.confirmedStudy.filter((_, i) => i !== idx)
+    }))
+  }
+
+  // Current time indicator
+  const todayDate = new Date()
+  const todayDayIdx = (() => {
+    const d = todayDate.getDay()
+    return d === 0 ? 6 : d - 1 // Monday = 0
+  })()
+  const isCurrentWeek = weekOffset === 0
+  const currentHour = currentTime.getHours() + currentTime.getMinutes() / 60
+
+  const allBlocks = getAllBlocks()
+
+  const gridStyle = {
+    display: 'grid',
+    gridTemplateColumns: '50px repeat(7, 1fr)',
+    gridTemplateRows: `32px repeat(${HOURS.length}, 50px)`,
+    gap: 0,
+    background: '#18181B',
+    border: '1px solid #27272A',
+    borderRadius: 12,
+    overflow: 'hidden',
+    position: 'relative',
+  }
+
+  const formatHour = (h) => {
+    const hh = Math.floor(h)
+    const mm = Math.round((h - hh) * 60)
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+  }
+
+  return (
+    <div>
+      {/* Week navigation */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+        <button style={S.btn()} onClick={() => setWeekOffset(w => w - 1)}>← Anterior</button>
+        <div style={{ textAlign: 'center' }}>
+          <span style={{ fontSize: 16, fontWeight: 600, color: '#FAFAFA' }}>
+            Semana del {formatShortDate(weekDates[0])} – {formatShortDate(weekDates[6])}
+          </span>
+          <span style={{ fontSize: 12, color: '#71717A', marginLeft: 8 }}>{weekKey}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {weekOffset !== 0 && (
+            <button style={S.btn('#3B82F6', '#fff')} onClick={() => setWeekOffset(0)}>Hoy</button>
+          )}
+          <button style={S.btn()} onClick={() => setWeekOffset(w => w + 1)}>Siguiente →</button>
+        </div>
+      </div>
+
+      {/* Google Calendar Sync */}
+      <GoogleCalendarSync allBlocks={allBlocks} weekDates={weekDates} weekKey={weekKey} />
+
+      {/* Workout tracker */}
+      <div style={{
+        background: '#18181B',
+        border: '1px solid #27272A',
+        borderRadius: 10,
+        padding: '14px 16px',
+        marginBottom: 16,
+        borderLeft: `3px solid ${BLOCK_COLORS.sport}`,
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: '#FAFAFA' }}>
+            Entrenamientos: {workoutsDone}/3 esta semana
+          </span>
+          <span style={{
+            fontSize: 12,
+            fontWeight: 600,
+            color: workoutsDone >= 3 ? '#22C55E' : '#F59E0B',
+            background: workoutsDone >= 3 ? 'rgba(34,197,94,0.15)' : 'rgba(245,158,11,0.15)',
+            padding: '2px 8px',
+            borderRadius: 4,
+          }}>
+            {workoutsDone >= 3 ? 'Meta cumplida' : `Faltan ${3 - workoutsDone}`}
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          {WORKOUT_SLOTS.map(w => (
+            <label key={w.id} style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              background: workouts[w.id] ? 'rgba(34,197,94,0.1)' : '#0F0F11',
+              border: `1px solid ${workouts[w.id] ? '#22C55E44' : '#27272A'}`,
+              borderRadius: 8, padding: '8px 12px', cursor: 'pointer',
+            }}>
+              <input
+                type="checkbox"
+                checked={!!workouts[w.id]}
+                onChange={() => toggleWorkout(w.id)}
+                style={{ accentColor: '#22C55E' }}
+              />
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 500, color: '#E4E4E7' }}>{DAY_NAMES[w.day]} — {w.label}</div>
+                <div style={{ fontSize: 11, color: '#71717A' }}>{w.time}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      {/* Work shift input */}
+      <div style={{
+        background: '#18181B',
+        border: '1px solid #27272A',
+        borderRadius: 10,
+        padding: '14px 16px',
+        marginBottom: 20,
+        borderLeft: `3px solid ${BLOCK_COLORS.work}`,
+      }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: '#FAFAFA', display: 'block', marginBottom: 10 }}>
+          Agregar turno de trabajo
+        </span>
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <select
+            value={shiftDay}
+            onChange={(e) => setShiftDay(parseInt(e.target.value))}
+            style={{
+              background: '#0F0F11', border: '1px solid #27272A', borderRadius: 6,
+              color: '#FAFAFA', fontSize: 13, padding: '6px 10px', outline: 'none',
+            }}
+          >
+            <option value={4}>Viernes</option>
+            <option value={5}>Sábado</option>
+            <option value={6}>Domingo</option>
+          </select>
+          <input
+            type="time"
+            value={shiftStart}
+            onChange={(e) => setShiftStart(e.target.value)}
+            style={{
+              background: '#0F0F11', border: '1px solid #27272A', borderRadius: 6,
+              color: '#FAFAFA', fontSize: 13, padding: '6px 10px', outline: 'none',
+            }}
+          />
+          <span style={{ color: '#71717A' }}>a</span>
+          <input
+            type="time"
+            value={shiftEnd}
+            onChange={(e) => setShiftEnd(e.target.value)}
+            style={{
+              background: '#0F0F11', border: '1px solid #27272A', borderRadius: 6,
+              color: '#FAFAFA', fontSize: 13, padding: '6px 10px', outline: 'none',
+            }}
+          />
+          <button style={S.btn('#F59E0B', '#000')} onClick={addWorkShift}>+ Agregar turno</button>
+        </div>
+        {/* List existing work shifts */}
+        {Object.entries(workShifts).map(([dayStr, shifts]) =>
+          shifts.map((shift, idx) => (
+            <div key={`${dayStr}-${idx}`} style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)',
+              borderRadius: 6, padding: '4px 10px', marginTop: 8, marginRight: 8, fontSize: 12, color: '#F59E0B',
+            }}>
+              {DAY_NAMES[parseInt(dayStr)]} {formatHour(shift.start)}–{formatHour(shift.end)}
+              <button
+                onClick={() => removeWorkShift(parseInt(dayStr), idx)}
+                style={{ background: 'none', border: 'none', color: '#EF4444', cursor: 'pointer', fontSize: 14, padding: '0 2px' }}
+              >
+                ✕
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+
+      {/* Weekly Grid */}
+      <div style={gridStyle}>
+        {/* Header row: empty corner + day names */}
+        <div style={{
+          gridColumn: 1, gridRow: 1,
+          background: '#0F0F11', borderBottom: '1px solid #27272A', borderRight: '1px solid #27272A',
+        }} />
+        {DAY_NAMES.map((name, i) => {
+          const isToday = isCurrentWeek && todayDayIdx === i
+          return (
+            <div key={name} style={{
+              gridColumn: i + 2, gridRow: 1,
+              background: isToday ? '#1E293B' : '#0F0F11',
+              borderBottom: '1px solid #27272A',
+              borderRight: i < 6 ? '1px solid #1E1E21' : 'none',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 12, fontWeight: 600,
+              color: isToday ? '#3B82F6' : '#A1A1AA',
+            }}>
+              {name} {weekDates[i].getDate()}
+            </div>
+          )
+        })}
+
+        {/* Hour rows */}
+        {HOURS.map((hour, rowIdx) => (
+          <React.Fragment key={hour}>
+            {/* Hour label */}
+            <div style={{
+              gridColumn: 1, gridRow: rowIdx + 2,
+              background: '#0F0F11',
+              borderBottom: '1px solid #1E1E21',
+              borderRight: '1px solid #27272A',
+              display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
+              fontSize: 10, color: '#52525B', paddingTop: 2,
+            }}>
+              {String(hour).padStart(2, '0')}:00
+            </div>
+            {/* Day cells */}
+            {DAY_NAMES.map((_, dayIdx) => (
+              <div key={`${hour}-${dayIdx}`} style={{
+                gridColumn: dayIdx + 2, gridRow: rowIdx + 2,
+                borderBottom: '1px solid #1E1E21',
+                borderRight: dayIdx < 6 ? '1px solid #1E1E21' : 'none',
+                background: isCurrentWeek && todayDayIdx === dayIdx ? '#0D1117' : 'transparent',
+                position: 'relative',
+              }} />
+            ))}
+          </React.Fragment>
+        ))}
+
+        {/* Render blocks on top of the grid */}
+        {allBlocks.map((block, idx) => {
+          const startRow = 2 + (block.start - 7) // Row offset from 7:00
+          const endRow = 2 + (block.end - 7)
+          const color = BLOCK_COLORS[block.type] || '#3F3F46'
+
+          return (
+            <div key={`block-${idx}`} style={{
+              gridColumn: block.day + 2,
+              gridRowStart: Math.max(2, Math.round(startRow * 1 + 1) ),
+              gridRowEnd: Math.max(3, Math.round(endRow * 1 + 1)),
+              // Use absolute positioning within the cell for sub-hour precision
+              position: 'relative',
+              background: color + '33',
+              borderLeft: `3px solid ${color}`,
+              borderRadius: 4,
+              margin: '1px 2px',
+              padding: '2px 6px',
+              fontSize: 11,
+              fontWeight: 500,
+              color: color,
+              overflow: 'hidden',
+              zIndex: 2,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              cursor: block.type === 'study' ? 'pointer' : 'default',
+            }}
+            onClick={() => {
+              if (block.type === 'study') {
+                const studyIdx = confirmedStudy.findIndex(
+                  s => s.day === block.day && s.start === block.start && s.end === block.end
+                )
+                if (studyIdx >= 0) removeStudyBlock(studyIdx)
+              }
+            }}
+            title={block.type === 'study' ? 'Click para quitar' : ''}
+            >
+              <span>{block.label}</span>
+              <span style={{ fontSize: 9, opacity: 0.7 }}>
+                {formatHour(block.start)}–{formatHour(block.end)}
+              </span>
+            </div>
+          )
+        })}
+
+        {/* Study suggestions (dashed border) */}
+        {studySuggestions.map((sug, idx) => {
+          const startRow = 2 + (sug.start - 7)
+          const endRow = 2 + (sug.end - 7)
+          const color = BLOCK_COLORS.study
+
+          return (
+            <div key={`sug-${idx}`} style={{
+              gridColumn: sug.day + 2,
+              gridRowStart: Math.max(2, Math.round(startRow + 1)),
+              gridRowEnd: Math.max(3, Math.round(endRow + 1)),
+              position: 'relative',
+              background: color + '11',
+              border: `1px dashed ${color}55`,
+              borderRadius: 4,
+              margin: '1px 2px',
+              padding: '2px 6px',
+              fontSize: 10,
+              color: color + '99',
+              overflow: 'hidden',
+              zIndex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              cursor: 'pointer',
+            }}
+            onClick={() => confirmStudyBlock(sug)}
+            title="Click para confirmar bloque de estudio"
+            >
+              <span>+ Estudio</span>
+              <span style={{ fontSize: 9, opacity: 0.7 }}>
+                {formatHour(sug.start)}–{formatHour(sug.end)}
+              </span>
+            </div>
+          )
+        })}
+
+        {/* Current time line */}
+        {isCurrentWeek && currentHour >= 7 && currentHour <= 22 && (
+          <div style={{
+            gridColumn: todayDayIdx + 2,
+            gridRow: `2 / ${HOURS.length + 2}`,
+            position: 'relative',
+            pointerEvents: 'none',
+            zIndex: 10,
+          }}>
+            <div style={{
+              position: 'absolute',
+              top: `${((currentHour - 7) / HOURS.length) * 100}%`,
+              left: 0,
+              right: 0,
+              height: 2,
+              background: '#EF4444',
+              boxShadow: '0 0 4px rgba(239,68,68,0.5)',
+            }}>
+              <div style={{
+                position: 'absolute',
+                left: -3,
+                top: -3,
+                width: 8,
+                height: 8,
+                borderRadius: '50%',
+                background: '#EF4444',
+              }} />
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Legend */}
+      <div style={{ display: 'flex', gap: 16, marginTop: 12, flexWrap: 'wrap' }}>
+        {[
+          { label: 'Clases', color: BLOCK_COLORS.class },
+          { label: 'Deporte', color: BLOCK_COLORS.sport },
+          { label: 'Trabajo', color: BLOCK_COLORS.work },
+          { label: 'Estudio', color: BLOCK_COLORS.study },
+        ].map(item => (
+          <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#A1A1AA' }}>
+            <div style={{ width: 12, height: 12, borderRadius: 3, background: item.color }} />
+            {item.label}
+          </div>
+        ))}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#A1A1AA' }}>
+          <div style={{ width: 12, height: 12, borderRadius: 3, border: '1px dashed #8B5CF655', background: '#8B5CF611' }} />
+          Sugerido (click para confirmar)
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Main App ────────────────────────────────────────────────────────
 
 export default function App() {
   const [state, setState] = useState(loadState)
   const [streak, setStreak] = useState(loadStreak)
-  const [filter, setFilter] = useState('all') // 'all' | cert.id | 'pending' | 'overdue'
+  const [filter, setFilter] = useState('all')
+  const [activeTab, setActiveTab] = useState(loadTab)
   const [weeklyGoal, setWeeklyGoal] = useState(() => {
     try { return parseInt(localStorage.getItem('cert-roadmap-weekly') || '10') } catch { return 10 }
   })
@@ -573,6 +1489,7 @@ export default function App() {
   useEffect(() => { saveState(state) }, [state])
   useEffect(() => { saveStreak(streak) }, [streak])
   useEffect(() => { localStorage.setItem('cert-roadmap-weekly', String(weeklyGoal)) }, [weeklyGoal])
+  useEffect(() => { localStorage.setItem(TAB_KEY, activeTab) }, [activeTab])
 
   // Update streak on any check
   const recordActivity = useCallback(() => {
@@ -676,77 +1593,93 @@ export default function App() {
         <p style={S.subtitle}>AI Automation Engineer &middot; Abr 2026 – Mar 2027</p>
       </header>
 
-      {/* Timeline */}
-      <Timeline checked={checked} />
-
-      {/* Stats */}
-      <div style={S.statsGrid}>
-        <StatCard label="Progreso total" value={`${totalPct}%`} sub={`${totalDone}/${totalSteps} pasos`} color="#FAFAFA" />
-        <StatCard label="Horas restantes" value={`${hoursRemaining}h`} sub={`${hoursCompleted}h completadas`} color="#3B82F6" />
-        <StatCard label="Streak" value={`${streak.count} día${streak.count !== 1 ? 's' : ''}`} sub={streak.lastDate ? `Último: ${formatDate(streak.lastDate)}` : 'Sin actividad aún'} color="#FACC15" />
-        <StatCard
-          label="Próximo deadline"
-          value={upcomingStep ? `${daysUntil(upcomingStep.dueDate)}d` : '—'}
-          sub={upcomingStep ? upcomingStep.label.slice(0, 35) + (upcomingStep.label.length > 35 ? '…' : '') : 'Todo al día'}
-          color="#22C55E"
-        />
-        {overdueSteps.length > 0 && (
-          <StatCard label="Atrasados" value={overdueSteps.length} sub="pasos vencidos" color="#EF4444" />
-        )}
+      {/* Tabs */}
+      <div style={S.tabBar}>
+        <button style={S.tab(activeTab === 'certs')} onClick={() => setActiveTab('certs')}>
+          Certificaciones
+        </button>
+        <button style={S.tab(activeTab === 'planner')} onClick={() => setActiveTab('planner')}>
+          Mi Semana
+        </button>
       </div>
 
-      {/* Weekly goal */}
-      <div style={S.weeklyGoal}>
-        <span style={{ fontSize: 13, color: '#A1A1AA' }}>Meta semanal:</span>
-        <input
-          type="number"
-          min={1}
-          max={40}
-          value={weeklyGoal}
-          onChange={(e) => setWeeklyGoal(Math.max(1, Math.min(40, parseInt(e.target.value) || 1)))}
-          style={S.weeklyInput}
-        />
-        <span style={{ fontSize: 13, color: '#A1A1AA' }}>horas/semana</span>
-        <span style={{ fontSize: 12, color: '#52525B', marginLeft: 'auto' }}>
-          A {weeklyGoal}h/semana → ~{Math.ceil(hoursRemaining / weeklyGoal)} semanas restantes
-        </span>
-      </div>
+      {activeTab === 'certs' ? (
+        <>
+          {/* Timeline */}
+          <Timeline checked={checked} />
 
-      {/* Toolbar */}
-      <div style={S.toolbar}>
-        <button style={S.btn('#27272A')} onClick={handleExport}>↓ Exportar JSON</button>
-        <button style={S.btn('#27272A')} onClick={handleImport}>↑ Importar JSON</button>
-        <button style={S.btn('#27272A', '#EF4444')} onClick={handleReset}>✕ Resetear</button>
-      </div>
+          {/* Stats */}
+          <div style={S.statsGrid}>
+            <StatCard label="Progreso total" value={`${totalPct}%`} sub={`${totalDone}/${totalSteps} pasos`} color="#FAFAFA" />
+            <StatCard label="Horas restantes" value={`${hoursRemaining}h`} sub={`${hoursCompleted}h completadas`} color="#3B82F6" />
+            <StatCard label="Streak" value={`${streak.count} día${streak.count !== 1 ? 's' : ''}`} sub={streak.lastDate ? `Último: ${formatDate(streak.lastDate)}` : 'Sin actividad aún'} color="#FACC15" />
+            <StatCard
+              label="Próximo deadline"
+              value={upcomingStep ? `${daysUntil(upcomingStep.dueDate)}d` : '—'}
+              sub={upcomingStep ? upcomingStep.label.slice(0, 35) + (upcomingStep.label.length > 35 ? '…' : '') : 'Todo al día'}
+              color="#22C55E"
+            />
+            {overdueSteps.length > 0 && (
+              <StatCard label="Atrasados" value={overdueSteps.length} sub="pasos vencidos" color="#EF4444" />
+            )}
+          </div>
 
-      {/* Filters */}
-      <div style={S.filterBar}>
-        <button style={S.filterBtn(filter === 'all', '#FAFAFA')} onClick={() => setFilter('all')}>Todas</button>
-        {CERTIFICATIONS.map(c => (
-          <button key={c.id} style={S.filterBtn(filter === c.id, c.color)} onClick={() => setFilter(c.id)}>
-            {c.shortTitle}
-          </button>
-        ))}
-        <button style={S.filterBtn(filter === 'pending', '#FACC15')} onClick={() => setFilter('pending')}>Pendientes</button>
-        {overdueSteps.length > 0 && (
-          <button style={S.filterBtn(filter === 'overdue', '#EF4444')} onClick={() => setFilter('overdue')}>
-            Atrasados ({overdueSteps.length})
-          </button>
-        )}
-      </div>
+          {/* Weekly goal */}
+          <div style={S.weeklyGoal}>
+            <span style={{ fontSize: 13, color: '#A1A1AA' }}>Meta semanal:</span>
+            <input
+              type="number"
+              min={1}
+              max={40}
+              value={weeklyGoal}
+              onChange={(e) => setWeeklyGoal(Math.max(1, Math.min(40, parseInt(e.target.value) || 1)))}
+              style={S.weeklyInput}
+            />
+            <span style={{ fontSize: 13, color: '#A1A1AA' }}>horas/semana</span>
+            <span style={{ fontSize: 12, color: '#52525B', marginLeft: 'auto' }}>
+              A {weeklyGoal}h/semana → ~{Math.ceil(hoursRemaining / weeklyGoal)} semanas restantes
+            </span>
+          </div>
 
-      {/* Certification phases */}
-      {filteredCerts.map((cert, i) => (
-        <PhaseCard
-          key={cert.id}
-          cert={cert}
-          checked={checked}
-          notes={notes}
-          onToggle={handleToggle}
-          onNote={handleNote}
-          defaultExpanded={i === 0}
-        />
-      ))}
+          {/* Toolbar */}
+          <div style={S.toolbar}>
+            <button style={S.btn('#27272A')} onClick={handleExport}>↓ Exportar JSON</button>
+            <button style={S.btn('#27272A')} onClick={handleImport}>↑ Importar JSON</button>
+            <button style={S.btn('#27272A', '#EF4444')} onClick={handleReset}>✕ Resetear</button>
+          </div>
+
+          {/* Filters */}
+          <div style={S.filterBar}>
+            <button style={S.filterBtn(filter === 'all', '#FAFAFA')} onClick={() => setFilter('all')}>Todas</button>
+            {CERTIFICATIONS.map(c => (
+              <button key={c.id} style={S.filterBtn(filter === c.id, c.color)} onClick={() => setFilter(c.id)}>
+                {c.shortTitle}
+              </button>
+            ))}
+            <button style={S.filterBtn(filter === 'pending', '#FACC15')} onClick={() => setFilter('pending')}>Pendientes</button>
+            {overdueSteps.length > 0 && (
+              <button style={S.filterBtn(filter === 'overdue', '#EF4444')} onClick={() => setFilter('overdue')}>
+                Atrasados ({overdueSteps.length})
+              </button>
+            )}
+          </div>
+
+          {/* Certification phases */}
+          {filteredCerts.map((cert, i) => (
+            <PhaseCard
+              key={cert.id}
+              cert={cert}
+              checked={checked}
+              notes={notes}
+              onToggle={handleToggle}
+              onNote={handleNote}
+              defaultExpanded={i === 0}
+            />
+          ))}
+        </>
+      ) : (
+        <WeeklyPlanner />
+      )}
 
       {/* Footer */}
       <footer style={{ textAlign: 'center', padding: '32px 0 0', color: '#3F3F46', fontSize: 12 }}>
