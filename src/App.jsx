@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 
 // ── Certification data ──────────────────────────────────────────────
 const CERTIFICATIONS = [
@@ -226,7 +226,8 @@ function saveClassEvents(events) {
 
 function extractModuleName(category) {
   let name = category
-    .replace(/&amp;/g, '&')
+    .replace(/&amp\\?;/g, '&')
+    .replace(/\\,/g, ',')
     .replace(/^CS\d+L\d+M\d+[A-Z]?\s+/, '')
     .replace(/\s+\d{4}[A-Z]$/, '')
     .trim()
@@ -320,6 +321,50 @@ const BLOCK_COLORS = {
   sport: '#22C55E',
   work: '#F59E0B',
   study: '#8B5CF6',
+}
+
+// ── Overlap layout for calendar blocks ──────────────────────────────
+function layoutDayBlocks(blocks) {
+  if (!blocks.length) return []
+  const sorted = [...blocks].sort((a, b) => a.start - b.start || a.end - b.end)
+  const groups = []
+  let group = [sorted[0]]
+  let groupEnd = sorted[0].end
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].start < groupEnd) {
+      group.push(sorted[i])
+      groupEnd = Math.max(groupEnd, sorted[i].end)
+    } else {
+      groups.push(group)
+      group = [sorted[i]]
+      groupEnd = sorted[i].end
+    }
+  }
+  groups.push(group)
+  const result = []
+  for (const grp of groups) {
+    const cols = []
+    for (const block of grp) {
+      let placed = false
+      for (let c = 0; c < cols.length; c++) {
+        if (cols[c] <= block.start) {
+          cols[c] = block.end
+          result.push({ ...block, _col: c, _totalCols: 0 })
+          placed = true
+          break
+        }
+      }
+      if (!placed) {
+        cols.push(block.end)
+        result.push({ ...block, _col: cols.length - 1, _totalCols: 0 })
+      }
+    }
+    const tc = cols.length
+    for (let i = result.length - grp.length; i < result.length; i++) {
+      result[i]._totalCols = tc
+    }
+  }
+  return result
 }
 
 // ── Google Calendar Config ─────────────────────────────────────────
@@ -1059,6 +1104,8 @@ function WeeklyPlanner() {
   const [editStart, setEditStart] = useState('')
   const [editEnd, setEditEnd] = useState('')
   const [importMsg, setImportMsg] = useState(null)
+  const [dragInfo, setDragInfo] = useState(null)
+  const gridRef = useRef(null)
 
   const refDate = useMemo(() => {
     const d = new Date()
@@ -1148,6 +1195,66 @@ function WeeklyPlanner() {
     setEditStart(fmtH(block.start))
     setEditEnd(fmtH(block.end))
   }
+
+  // Drag & drop for class blocks
+  const handleDragStart = useCallback((e, block) => {
+    if (!block.uid) return
+    e.preventDefault()
+    setDragInfo({
+      block,
+      currentDay: block.day,
+      currentStart: block.start,
+      currentEnd: block.end,
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!dragInfo) return
+    const handleMove = (e) => {
+      const grid = gridRef.current
+      if (!grid) return
+      const rect = grid.getBoundingClientRect()
+      const headerH = 32
+      const timeColW = 50
+      const colW = (rect.width - timeColW) / 7
+      const totalH = rect.height - headerH
+      const relX = e.clientX - rect.left - timeColW
+      const relY = e.clientY - rect.top - headerH
+      const newDay = Math.max(0, Math.min(6, Math.floor(relX / colW)))
+      const hourFrac = (relY / totalH) * HOURS.length + 7
+      const snapped = Math.round(hourFrac * 2) / 2
+      const duration = dragInfo.block.end - dragInfo.block.start
+      const newStart = Math.max(7, Math.min(22 - duration, snapped))
+      setDragInfo(prev => prev ? ({
+        ...prev,
+        currentDay: newDay,
+        currentStart: newStart,
+        currentEnd: newStart + duration,
+      }) : null)
+    }
+    const handleUp = () => {
+      if (!dragInfo) return
+      const { block, currentDay, currentStart, currentEnd } = dragInfo
+      const newDate = weekDates[currentDay]
+      if (newDate) {
+        const dateStr = `${newDate.getFullYear()}-${String(newDate.getMonth() + 1).padStart(2, '0')}-${String(newDate.getDate()).padStart(2, '0')}`
+        setClassEvents(prev => {
+          const updated = prev.map(e =>
+            e.uid === block.uid ? { ...e, date: dateStr, start: currentStart, end: currentEnd } : e
+          )
+          saveClassEvents(updated)
+          return updated
+        })
+      }
+      setDragInfo(null)
+    }
+    document.addEventListener('mousemove', handleMove)
+    document.addEventListener('mouseup', handleUp)
+    return () => {
+      document.removeEventListener('mousemove', handleMove)
+      document.removeEventListener('mouseup', handleUp)
+    }
+  }, [dragInfo, weekDates])
 
   // Work shift input state
   const [shiftDay, setShiftDay] = useState(4) // Friday default
@@ -1527,7 +1634,7 @@ function WeeklyPlanner() {
       </div>
 
       {/* Weekly Grid */}
-      <div style={gridStyle}>
+      <div ref={gridRef} style={gridStyle}>
         {/* Header row: empty corner + day names */}
         <div style={{
           gridColumn: 1, gridRow: 1,
@@ -1553,7 +1660,6 @@ function WeeklyPlanner() {
         {/* Hour rows */}
         {HOURS.map((hour, rowIdx) => (
           <React.Fragment key={hour}>
-            {/* Hour label */}
             <div style={{
               gridColumn: 1, gridRow: rowIdx + 2,
               background: '#0F0F11',
@@ -1564,105 +1670,169 @@ function WeeklyPlanner() {
             }}>
               {String(hour).padStart(2, '0')}:00
             </div>
-            {/* Day cells */}
             {DAY_NAMES.map((_, dayIdx) => (
               <div key={`${hour}-${dayIdx}`} style={{
                 gridColumn: dayIdx + 2, gridRow: rowIdx + 2,
                 borderBottom: '1px solid #1E1E21',
                 borderRight: dayIdx < 6 ? '1px solid #1E1E21' : 'none',
                 background: isCurrentWeek && todayDayIdx === dayIdx ? '#0D1117' : 'transparent',
-                position: 'relative',
               }} />
             ))}
           </React.Fragment>
         ))}
 
-        {/* Render blocks on top of the grid */}
-        {allBlocks.map((block, idx) => {
-          const startRow = 2 + (block.start - 7) // Row offset from 7:00
-          const endRow = 2 + (block.end - 7)
-          const color = BLOCK_COLORS[block.type] || '#3F3F46'
-          const isEditing = editingBlock && editingBlock.uid && editingBlock.uid === block.uid
-          const isClickable = block.type === 'class' || block.type === 'study'
+        {/* Day overlay containers — absolute positioning for precise block placement */}
+        {[0, 1, 2, 3, 4, 5, 6].map(dayIdx => {
+          const dayBlocks = layoutDayBlocks(
+            allBlocks
+              .filter(b => b.day === dayIdx)
+              .filter(b => !(dragInfo && dragInfo.block.uid && dragInfo.block.uid === b.uid))
+          )
+          const daySuggestions = studySuggestions.filter(s => s.day === dayIdx)
 
           return (
-            <div key={`block-${idx}`} style={{
-              gridColumn: block.day + 2,
-              gridRowStart: Math.max(2, Math.round(startRow * 1 + 1) ),
-              gridRowEnd: Math.max(3, Math.round(endRow * 1 + 1)),
+            <div key={`overlay-${dayIdx}`} style={{
+              gridColumn: dayIdx + 2,
+              gridRow: `2 / ${HOURS.length + 2}`,
               position: 'relative',
-              background: color + '33',
-              borderLeft: `3px solid ${color}`,
-              borderRadius: 4,
-              margin: '1px 2px',
-              padding: '2px 6px',
-              fontSize: 11,
-              fontWeight: 500,
-              color: color,
-              overflow: 'hidden',
-              zIndex: isEditing ? 5 : 2,
-              display: 'flex',
-              flexDirection: 'column',
-              justifyContent: 'center',
-              cursor: isClickable ? 'pointer' : 'default',
-              outline: isEditing ? `2px solid ${color}` : 'none',
-            }}
-            onClick={() => {
-              if (block.type === 'study') {
-                const studyIdx = confirmedStudy.findIndex(
-                  s => s.day === block.day && s.start === block.start && s.end === block.end
+              zIndex: 2,
+            }}>
+              {/* Blocks */}
+              {dayBlocks.map((block, idx) => {
+                const color = BLOCK_COLORS[block.type] || '#3F3F46'
+                const topPct = ((block.start - 7) / HOURS.length) * 100
+                const heightPct = ((block.end - block.start) / HOURS.length) * 100
+                const isEditing = editingBlock?.uid && editingBlock.uid === block.uid
+                const isClickable = block.type === 'class' || block.type === 'study'
+                const leftPct = block._totalCols > 1 ? (block._col / block._totalCols) * 100 : 0
+                const widthPct = block._totalCols > 1 ? 100 / block._totalCols : 100
+
+                return (
+                  <div key={`b-${idx}`} style={{
+                    position: 'absolute',
+                    top: `${topPct}%`,
+                    height: `${heightPct}%`,
+                    left: `calc(${leftPct}% + 2px)`,
+                    width: `calc(${widthPct}% - 4px)`,
+                    background: color + '33',
+                    borderLeft: `3px solid ${color}`,
+                    borderRadius: 4,
+                    padding: '2px 4px',
+                    fontSize: block._totalCols > 1 ? 9 : 11,
+                    fontWeight: 500,
+                    color,
+                    overflow: 'hidden',
+                    cursor: isClickable ? 'pointer' : block.uid ? 'grab' : 'default',
+                    outline: isEditing ? `2px solid ${color}` : 'none',
+                    zIndex: isEditing ? 5 : 2,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'center',
+                    boxSizing: 'border-box',
+                    userSelect: 'none',
+                  }}
+                  onClick={() => {
+                    if (dragInfo) return
+                    if (block.type === 'study') {
+                      const studyIdx = confirmedStudy.findIndex(
+                        s => s.day === block.day && s.start === block.start && s.end === block.end
+                      )
+                      if (studyIdx >= 0) removeStudyBlock(studyIdx)
+                    } else if (block.type === 'class' && block.uid) {
+                      startEdit(block)
+                    }
+                  }}
+                  onMouseDown={(e) => {
+                    if (block.uid) handleDragStart(e, block)
+                  }}
+                  title={block.type === 'study' ? 'Click para quitar' : block.uid ? 'Arrastra para mover · Click para editar' : ''}
+                  >
+                    <span>{block.label}</span>
+                    <span style={{ fontSize: block._totalCols > 1 ? 7 : 9, opacity: 0.7 }}>
+                      {formatHour(block.start)}–{formatHour(block.end)}
+                    </span>
+                  </div>
                 )
-                if (studyIdx >= 0) removeStudyBlock(studyIdx)
-              } else if (block.type === 'class' && block.uid) {
-                startEdit(block)
-              }
-            }}
-            title={block.type === 'study' ? 'Click para quitar' : block.type === 'class' ? 'Click para editar' : ''}
-            >
-              <span>{block.label}</span>
-              <span style={{ fontSize: 9, opacity: 0.7 }}>
-                {formatHour(block.start)}–{formatHour(block.end)}
-              </span>
+              })}
+
+              {/* Study suggestions */}
+              {daySuggestions.map((sug, idx) => {
+                const topPct = ((sug.start - 7) / HOURS.length) * 100
+                const heightPct = ((sug.end - sug.start) / HOURS.length) * 100
+                const color = BLOCK_COLORS.study
+                return (
+                  <div key={`sug-${idx}`} style={{
+                    position: 'absolute',
+                    top: `${topPct}%`,
+                    height: `${heightPct}%`,
+                    left: 2,
+                    right: 2,
+                    background: color + '11',
+                    border: `1px dashed ${color}55`,
+                    borderRadius: 4,
+                    padding: '2px 4px',
+                    fontSize: 10,
+                    color: color + '99',
+                    overflow: 'hidden',
+                    zIndex: 1,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'center',
+                    cursor: 'pointer',
+                    boxSizing: 'border-box',
+                  }}
+                  onClick={() => confirmStudyBlock(sug)}
+                  title="Click para confirmar bloque de estudio"
+                  >
+                    <span>+ Estudio</span>
+                    <span style={{ fontSize: 8, opacity: 0.7 }}>
+                      {formatHour(sug.start)}–{formatHour(sug.end)}
+                    </span>
+                  </div>
+                )
+              })}
             </div>
           )
         })}
 
-        {/* Study suggestions (dashed border) */}
-        {studySuggestions.map((sug, idx) => {
-          const startRow = 2 + (sug.start - 7)
-          const endRow = 2 + (sug.end - 7)
-          const color = BLOCK_COLORS.study
-
+        {/* Drag ghost */}
+        {dragInfo && (() => {
+          const color = BLOCK_COLORS.class
+          const topPct = ((dragInfo.currentStart - 7) / HOURS.length) * 100
+          const heightPct = ((dragInfo.currentEnd - dragInfo.currentStart) / HOURS.length) * 100
           return (
-            <div key={`sug-${idx}`} style={{
-              gridColumn: sug.day + 2,
-              gridRowStart: Math.max(2, Math.round(startRow + 1)),
-              gridRowEnd: Math.max(3, Math.round(endRow + 1)),
+            <div style={{
+              gridColumn: dragInfo.currentDay + 2,
+              gridRow: `2 / ${HOURS.length + 2}`,
               position: 'relative',
-              background: color + '11',
-              border: `1px dashed ${color}55`,
-              borderRadius: 4,
-              margin: '1px 2px',
-              padding: '2px 6px',
-              fontSize: 10,
-              color: color + '99',
-              overflow: 'hidden',
-              zIndex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              justifyContent: 'center',
-              cursor: 'pointer',
-            }}
-            onClick={() => confirmStudyBlock(sug)}
-            title="Click para confirmar bloque de estudio"
-            >
-              <span>+ Estudio</span>
-              <span style={{ fontSize: 9, opacity: 0.7 }}>
-                {formatHour(sug.start)}–{formatHour(sug.end)}
-              </span>
+              zIndex: 20,
+              pointerEvents: 'none',
+            }}>
+              <div style={{
+                position: 'absolute',
+                top: `${topPct}%`,
+                height: `${heightPct}%`,
+                left: 2, right: 2,
+                background: color + '55',
+                borderLeft: `3px solid ${color}`,
+                borderRadius: 4,
+                padding: '2px 4px',
+                fontSize: 10,
+                fontWeight: 600,
+                color,
+                boxSizing: 'border-box',
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'center',
+              }}>
+                <span>{dragInfo.block.label}</span>
+                <span style={{ fontSize: 8, opacity: 0.7 }}>
+                  {formatHour(dragInfo.currentStart)}–{formatHour(dragInfo.currentEnd)}
+                </span>
+              </div>
             </div>
           )
-        })}
+        })()}
 
         {/* Current time line */}
         {isCurrentWeek && currentHour >= 7 && currentHour <= 22 && (
