@@ -1173,14 +1173,6 @@ function WeeklyPlanner() {
     e.target.value = ''
   }
 
-  // Deadlines for current week
-  const weekDeadlines = useMemo(() => {
-    return deadlines.filter(d => {
-      const dayIdx = dateToDayIdx(d.date)
-      return dayIdx >= 0
-    }).map(d => ({ ...d, dayIdx: dateToDayIdx(d.date) }))
-  }, [deadlines, dateToDayIdx])
-
   // Edit/delete custom events (NOT class events — those are fixed)
   const startEdit = (block) => {
     if (block.type === 'class' || block.type === 'study' || block.type === 'sport') return
@@ -1299,6 +1291,14 @@ function WeeklyPlanner() {
     }
     return -1
   }, [weekDates])
+
+  // Deadlines for current week
+  const weekDeadlines = useMemo(() => {
+    return deadlines.filter(d => {
+      const dayIdx = dateToDayIdx(d.date)
+      return dayIdx >= 0
+    }).map(d => ({ ...d, dayIdx: dateToDayIdx(d.date) }))
+  }, [deadlines, dateToDayIdx])
 
   // Collect all blocks for the grid
   const getAllBlocks = useCallback(() => {
