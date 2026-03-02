@@ -197,19 +197,11 @@ function formatShortDate(date) {
 const DAY_NAMES = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom']
 const HOURS = Array.from({ length: 16 }, (_, i) => i + 7) // 7:00 to 22:00
 
-// ── Fixed schedule blocks ───────────────────────────────────────────
-const FIXED_BLOCKS = [
-  // Monday
+// ── Fixed sport blocks (recurring weekly) ───────────────────────────
+const SPORT_BLOCKS = [
   { day: 0, start: 10, end: 11.5, label: 'Gym', type: 'sport' },
-  { day: 0, start: 13, end: 16.5, label: 'Clases Dorset', type: 'class' },
-  // Tuesday
-  { day: 1, start: 9, end: 16.5, label: 'Clases Dorset', type: 'class' },
-  // Wednesday
-  { day: 2, start: 13, end: 16.5, label: 'Clases Dorset', type: 'class' },
   { day: 2, start: 19.5, end: 21, label: 'Climbing', type: 'sport' },
-  // Thursday
   { day: 3, start: 7, end: 9, label: 'Fútbol', type: 'sport' },
-  { day: 3, start: 9, end: 13, label: 'Clases Dorset', type: 'class' },
 ]
 
 const WORKOUT_SLOTS = [
@@ -217,6 +209,111 @@ const WORKOUT_SLOTS = [
   { id: 'climb-wed', day: 2, label: 'Climbing', time: '19:30–21:00' },
   { id: 'futbol-thu', day: 3, label: 'Fútbol', time: '7:00–9:00' },
 ]
+
+// ── ICS Import ──────────────────────────────────────────────────────
+const CLASSES_STORAGE_KEY = 'cert-planner-classes'
+
+function loadClassEvents() {
+  try {
+    const raw = localStorage.getItem(CLASSES_STORAGE_KEY)
+    return raw ? JSON.parse(raw) : []
+  } catch { return [] }
+}
+
+function saveClassEvents(events) {
+  localStorage.setItem(CLASSES_STORAGE_KEY, JSON.stringify(events))
+}
+
+function extractModuleName(category) {
+  let name = category
+    .replace(/&amp;/g, '&')
+    .replace(/^CS\d+L\d+M\d+[A-Z]?\s+/, '')
+    .replace(/\s+\d{4}[A-Z]$/, '')
+    .trim()
+  const shorts = {
+    'Statistics & Data Science': 'Stats & Data',
+    'Full Stack Development 2': 'Full Stack Dev',
+    'Game Design 2': 'Game Design',
+    'Software Engineering': 'Software Eng',
+  }
+  return shorts[name] || name
+}
+
+function parseICS(icsText) {
+  // Unfold continuation lines
+  const unfolded = icsText.replace(/\r?\n[ \t]/g, '')
+  const lines = unfolded.split(/\r?\n/)
+  const classEvents = []
+  const deadlines = []
+  let current = null
+
+  for (const line of lines) {
+    if (line === 'BEGIN:VEVENT') {
+      current = {}
+    } else if (line === 'END:VEVENT' && current) {
+      if (current.dtstart && current.dtend && current.categories) {
+        // Convert UTC to Dublin time
+        const start = icsDateToDublin(current.dtstart)
+        const end = icsDateToDublin(current.dtend)
+        if (start && end) {
+          if (current.summary === 'Attendance') {
+            const label = extractModuleName(current.categories)
+            classEvents.push({
+              uid: current.uid,
+              date: dublinDateStr(current.dtstart),
+              start: start.h + start.m / 60,
+              end: end.h + end.m / 60,
+              label,
+              type: 'class',
+              category: current.categories,
+            })
+          } else if (current.summary && current.summary.includes('is due')) {
+            deadlines.push({
+              uid: current.uid,
+              date: dublinDateStr(current.dtstart),
+              label: current.summary.replace(' is due', ''),
+              category: current.categories,
+            })
+          }
+        }
+      }
+      current = null
+    } else if (current) {
+      const colonIdx = line.indexOf(':')
+      if (colonIdx > 0) {
+        const key = line.slice(0, colonIdx).split(';')[0]
+        const value = line.slice(colonIdx + 1)
+        if (key === 'UID') current.uid = value
+        if (key === 'SUMMARY') current.summary = value
+        if (key === 'DTSTART') current.dtstart = value
+        if (key === 'DTEND') current.dtend = value
+        if (key === 'CATEGORIES') current.categories = value
+      }
+    }
+  }
+  return { classEvents, deadlines }
+}
+
+function icsDateToDublin(dtStr) {
+  const y = parseInt(dtStr.slice(0, 4))
+  const mo = parseInt(dtStr.slice(4, 6)) - 1
+  const d = parseInt(dtStr.slice(6, 8))
+  const h = parseInt(dtStr.slice(9, 11))
+  const mi = parseInt(dtStr.slice(11, 13))
+  const utc = new Date(Date.UTC(y, mo, d, h, mi, 0))
+  const dublin = new Date(utc.toLocaleString('en-US', { timeZone: 'Europe/Dublin' }))
+  return { h: dublin.getHours(), m: dublin.getMinutes() }
+}
+
+function dublinDateStr(dtStr) {
+  const y = parseInt(dtStr.slice(0, 4))
+  const mo = parseInt(dtStr.slice(4, 6)) - 1
+  const d = parseInt(dtStr.slice(6, 8))
+  const h = parseInt(dtStr.slice(9, 11))
+  const mi = parseInt(dtStr.slice(11, 13))
+  const utc = new Date(Date.UTC(y, mo, d, h, mi, 0))
+  return utc.toLocaleDateString('en-CA', { timeZone: 'Europe/Dublin' })
+}
 
 const BLOCK_COLORS = {
   class: '#3B82F6',
@@ -957,6 +1054,11 @@ function GoogleCalendarSync({ allBlocks, weekDates, weekKey }) {
 function WeeklyPlanner() {
   const [weekOffset, setWeekOffset] = useState(0)
   const [currentTime, setCurrentTime] = useState(new Date())
+  const [classEvents, setClassEvents] = useState(loadClassEvents)
+  const [editingBlock, setEditingBlock] = useState(null)
+  const [editStart, setEditStart] = useState('')
+  const [editEnd, setEditEnd] = useState('')
+  const [importMsg, setImportMsg] = useState(null)
 
   const refDate = useMemo(() => {
     const d = new Date()
@@ -972,6 +1074,7 @@ function WeeklyPlanner() {
   // Reload data when week changes
   useEffect(() => {
     setPlannerData(loadPlannerData(weekKey))
+    setEditingBlock(null)
   }, [weekKey])
 
   // Persist data
@@ -986,6 +1089,65 @@ function WeeklyPlanner() {
   }, [])
 
   const { workShifts, workouts, confirmedStudy } = plannerData
+
+  // ICS import handler
+  const handleImportICS = (e) => {
+    const file = e.target.files[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => {
+      const { classEvents: parsed } = parseICS(ev.target.result)
+      setClassEvents(parsed)
+      saveClassEvents(parsed)
+      setImportMsg(`${parsed.length} clases importadas`)
+      setTimeout(() => setImportMsg(null), 4000)
+    }
+    reader.readAsText(file)
+    e.target.value = '' // Reset input
+  }
+
+  // Delete a class event
+  const deleteClassEvent = (uid) => {
+    setClassEvents(prev => {
+      const updated = prev.filter(e => e.uid !== uid)
+      saveClassEvents(updated)
+      return updated
+    })
+    setEditingBlock(null)
+  }
+
+  // Save edited class event times
+  const saveEditBlock = () => {
+    if (!editingBlock) return
+    const startH = parseFloat(editStart.split(':')[0]) + parseFloat(editStart.split(':')[1]) / 60
+    const endH = parseFloat(editEnd.split(':')[0]) + parseFloat(editEnd.split(':')[1]) / 60
+    if (endH <= startH) return
+
+    if (editingBlock.uid) {
+      // Class event
+      setClassEvents(prev => {
+        const updated = prev.map(e =>
+          e.uid === editingBlock.uid ? { ...e, start: startH, end: endH } : e
+        )
+        saveClassEvents(updated)
+        return updated
+      })
+    }
+    setEditingBlock(null)
+  }
+
+  // Start editing a block
+  const startEdit = (block) => {
+    if (block.type === 'study') return // Handled by click-to-remove
+    setEditingBlock(block)
+    const fmtH = (h) => {
+      const hh = Math.floor(h)
+      const mm = Math.round((h - hh) * 60)
+      return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+    }
+    setEditStart(fmtH(block.start))
+    setEditEnd(fmtH(block.end))
+  }
 
   // Work shift input state
   const [shiftDay, setShiftDay] = useState(4) // Friday default
@@ -1026,13 +1188,35 @@ function WeeklyPlanner() {
 
   const workoutsDone = WORKOUT_SLOTS.filter(w => workouts[w.id]).length
 
+  // Helper: match date to day index in current week
+  const dateToDayIdx = useCallback((dateStr) => {
+    const evtDate = new Date(dateStr + 'T12:00:00')
+    for (let i = 0; i < 7; i++) {
+      const wd = weekDates[i]
+      if (wd.getFullYear() === evtDate.getFullYear() &&
+          wd.getMonth() === evtDate.getMonth() &&
+          wd.getDate() === evtDate.getDate()) {
+        return i
+      }
+    }
+    return -1
+  }, [weekDates])
+
   // Collect all blocks for the grid
   const getAllBlocks = useCallback(() => {
     const blocks = []
 
-    // Fixed blocks
-    FIXED_BLOCKS.forEach(b => {
+    // Sport blocks (recurring)
+    SPORT_BLOCKS.forEach(b => {
       blocks.push({ ...b })
+    })
+
+    // Imported class events for this week
+    classEvents.forEach(evt => {
+      const dayIdx = dateToDayIdx(evt.date)
+      if (dayIdx >= 0) {
+        blocks.push({ ...evt, day: dayIdx })
+      }
     })
 
     // Work shifts
@@ -1056,7 +1240,7 @@ function WeeklyPlanner() {
     })
 
     return blocks
-  }, [workShifts, confirmedStudy])
+  }, [classEvents, dateToDayIdx, workShifts, confirmedStudy])
 
   // Find free gaps >= 1.5h for study suggestions
   const studySuggestions = useMemo(() => {
@@ -1170,6 +1354,64 @@ function WeeklyPlanner() {
 
       {/* Google Calendar Sync */}
       <GoogleCalendarSync allBlocks={allBlocks} weekDates={weekDates} weekKey={weekKey} />
+
+      {/* ICS Import */}
+      <div style={{
+        background: '#18181B',
+        border: '1px solid #27272A',
+        borderRadius: 10,
+        padding: '14px 16px',
+        marginBottom: 16,
+        borderLeft: '3px solid #06B6D4',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+          <div>
+            <span style={{ fontSize: 14, fontWeight: 600, color: '#FAFAFA' }}>
+              Horario Dorset
+            </span>
+            <span style={{ fontSize: 12, color: '#71717A', marginLeft: 8 }}>
+              {classEvents.length > 0 ? `${classEvents.length} clases cargadas` : 'Sin importar'}
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <label style={{
+              ...S.btn('#06B6D4', '#000'),
+              cursor: 'pointer',
+              display: 'inline-block',
+            }}>
+              Importar .ics
+              <input
+                type="file"
+                accept=".ics"
+                onChange={handleImportICS}
+                style={{ display: 'none' }}
+              />
+            </label>
+            {classEvents.length > 0 && (
+              <button
+                style={S.btn('#27272A', '#EF4444')}
+                onClick={() => {
+                  if (confirm('¿Borrar todas las clases importadas?')) {
+                    setClassEvents([])
+                    saveClassEvents([])
+                  }
+                }}
+              >
+                Borrar todo
+              </button>
+            )}
+          </div>
+        </div>
+        {importMsg && (
+          <div style={{
+            marginTop: 8, fontSize: 12, color: '#22C55E',
+            background: 'rgba(34,197,94,0.1)', padding: '4px 10px',
+            borderRadius: 6, border: '1px solid rgba(34,197,94,0.3)',
+          }}>
+            {importMsg}
+          </div>
+        )}
+      </div>
 
       {/* Workout tracker */}
       <div style={{
@@ -1340,13 +1582,14 @@ function WeeklyPlanner() {
           const startRow = 2 + (block.start - 7) // Row offset from 7:00
           const endRow = 2 + (block.end - 7)
           const color = BLOCK_COLORS[block.type] || '#3F3F46'
+          const isEditing = editingBlock && editingBlock.uid && editingBlock.uid === block.uid
+          const isClickable = block.type === 'class' || block.type === 'study'
 
           return (
             <div key={`block-${idx}`} style={{
               gridColumn: block.day + 2,
               gridRowStart: Math.max(2, Math.round(startRow * 1 + 1) ),
               gridRowEnd: Math.max(3, Math.round(endRow * 1 + 1)),
-              // Use absolute positioning within the cell for sub-hour precision
               position: 'relative',
               background: color + '33',
               borderLeft: `3px solid ${color}`,
@@ -1357,11 +1600,12 @@ function WeeklyPlanner() {
               fontWeight: 500,
               color: color,
               overflow: 'hidden',
-              zIndex: 2,
+              zIndex: isEditing ? 5 : 2,
               display: 'flex',
               flexDirection: 'column',
               justifyContent: 'center',
-              cursor: block.type === 'study' ? 'pointer' : 'default',
+              cursor: isClickable ? 'pointer' : 'default',
+              outline: isEditing ? `2px solid ${color}` : 'none',
             }}
             onClick={() => {
               if (block.type === 'study') {
@@ -1369,9 +1613,11 @@ function WeeklyPlanner() {
                   s => s.day === block.day && s.start === block.start && s.end === block.end
                 )
                 if (studyIdx >= 0) removeStudyBlock(studyIdx)
+              } else if (block.type === 'class' && block.uid) {
+                startEdit(block)
               }
             }}
-            title={block.type === 'study' ? 'Click para quitar' : ''}
+            title={block.type === 'study' ? 'Click para quitar' : block.type === 'class' ? 'Click para editar' : ''}
             >
               <span>{block.label}</span>
               <span style={{ fontSize: 9, opacity: 0.7 }}>
@@ -1468,6 +1714,62 @@ function WeeklyPlanner() {
           Sugerido (click para confirmar)
         </div>
       </div>
+
+      {/* Edit panel for class blocks */}
+      {editingBlock && (
+        <div style={{
+          marginTop: 12,
+          background: '#18181B',
+          border: '1px solid #3B82F6',
+          borderRadius: 10,
+          padding: '14px 16px',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: '#FAFAFA' }}>
+              Editar: {editingBlock.label}
+            </span>
+            <button
+              style={{ background: 'none', border: 'none', color: '#71717A', cursor: 'pointer', fontSize: 16 }}
+              onClick={() => setEditingBlock(null)}
+            >
+              ✕
+            </button>
+          </div>
+          <div style={{ fontSize: 12, color: '#71717A', marginBottom: 10 }}>
+            {editingBlock.date} — {DAY_NAMES[editingBlock.day]}
+          </div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input
+              type="time"
+              value={editStart}
+              onChange={(e) => setEditStart(e.target.value)}
+              style={{
+                background: '#0F0F11', border: '1px solid #27272A', borderRadius: 6,
+                color: '#FAFAFA', fontSize: 13, padding: '6px 10px', outline: 'none',
+              }}
+            />
+            <span style={{ color: '#71717A' }}>a</span>
+            <input
+              type="time"
+              value={editEnd}
+              onChange={(e) => setEditEnd(e.target.value)}
+              style={{
+                background: '#0F0F11', border: '1px solid #27272A', borderRadius: 6,
+                color: '#FAFAFA', fontSize: 13, padding: '6px 10px', outline: 'none',
+              }}
+            />
+            <button style={S.btn('#3B82F6', '#fff')} onClick={saveEditBlock}>
+              Guardar
+            </button>
+            <button
+              style={S.btn('#EF4444', '#fff')}
+              onClick={() => deleteClassEvent(editingBlock.uid)}
+            >
+              Eliminar clase
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
