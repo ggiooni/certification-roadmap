@@ -944,7 +944,23 @@ function GoogleCalendarSync({ allBlocks, weekDates, weekKey }) {
     setSyncStatus('syncing')
 
     try {
+      // Get existing events for this week to avoid duplicates
+      const weekStart = new Date(weekDates[0])
+      weekStart.setHours(0, 0, 0, 0)
+      const weekEnd = new Date(weekDates[6])
+      weekEnd.setHours(23, 59, 59, 999)
+
+      const existingResponse = await window.gapi.client.calendar.events.list({
+        calendarId: GCAL_CALENDAR_ID,
+        timeMin: weekStart.toISOString(),
+        timeMax: weekEnd.toISOString(),
+        maxResults: 250,
+        singleEvents: true,
+      })
+      const existingEvents = existingResponse.result.items || []
+
       let created = 0
+      let skipped = 0
       for (const block of allBlocks) {
         const date = weekDates[block.day]
         if (!date) continue
@@ -958,6 +974,18 @@ function GoogleCalendarSync({ allBlocks, weekDates, weekKey }) {
         startDt.setHours(startHour, startMin, 0, 0)
         const endDt = new Date(date)
         endDt.setHours(endHour, endMin, 0, 0)
+
+        // Check if event already exists (same summary and start time)
+        const isDuplicate = existingEvents.some(ev =>
+          ev.summary === block.label &&
+          ev.start?.dateTime &&
+          new Date(ev.start.dateTime).getTime() === startDt.getTime()
+        )
+
+        if (isDuplicate) {
+          skipped++
+          continue
+        }
 
         const event = {
           summary: block.label,
@@ -982,7 +1010,7 @@ function GoogleCalendarSync({ allBlocks, weekDates, weekKey }) {
         })
         created++
       }
-      setSyncStatus({ created })
+      setSyncStatus({ created, skipped })
     } catch (err) {
       console.error('Sync error:', err)
       const msg = err?.result?.error?.message || err.message || 'Error desconocido'
@@ -1125,7 +1153,7 @@ function GoogleCalendarSync({ allBlocks, weekDates, weekKey }) {
         }}>
           {syncStatus.error
             ? `Error: ${syncStatus.error}`
-            : `${syncStatus.created} evento${syncStatus.created !== 1 ? 's' : ''} creado${syncStatus.created !== 1 ? 's' : ''} en Google Calendar`}
+            : `${syncStatus.created} evento${syncStatus.created !== 1 ? 's' : ''} creado${syncStatus.created !== 1 ? 's' : ''}${syncStatus.skipped ? `, ${syncStatus.skipped} ya existía${syncStatus.skipped !== 1 ? 'n' : ''}` : ''}`}
         </div>
       )}
     </div>
@@ -1312,12 +1340,27 @@ function WeeklyPlanner() {
     return -1
   }, [weekDates])
 
-  // Deadlines for current week
+  // Deadlines for current week (ICS imports + certification step due dates)
   const weekDeadlines = useMemo(() => {
-    return deadlines.filter(d => {
+    const icsDeadlines = deadlines.filter(d => {
       const dayIdx = dateToDayIdx(d.date)
       return dayIdx >= 0
     }).map(d => ({ ...d, dayIdx: dateToDayIdx(d.date) }))
+
+    // Add certification step deadlines for this week
+    const certDeadlines = CERTIFICATIONS.flatMap(c =>
+      c.steps.map(s => ({ ...s, certColor: c.color, certTitle: c.shortTitle }))
+    ).filter(s => {
+      const dayIdx = dateToDayIdx(s.dueDate)
+      return dayIdx >= 0
+    }).map(s => ({
+      label: `[${s.certTitle}] ${s.label}`,
+      date: s.dueDate,
+      dayIdx: dateToDayIdx(s.dueDate),
+      certColor: s.certColor,
+    }))
+
+    return [...icsDeadlines, ...certDeadlines]
   }, [deadlines, dateToDayIdx])
 
   // Collect all blocks for the grid
@@ -1802,6 +1845,7 @@ function WeeklyPlanner() {
         {[0, 1, 2, 3, 4, 5, 6].map(dayIdx => {
           const dayBlocks = layoutDayBlocks(allBlocks.filter(b => b.day === dayIdx))
           const daySuggestions = studySuggestions.filter(s => s.day === dayIdx)
+          const dayDeadlineMarkers = weekDeadlines.filter(d => d.dayIdx === dayIdx)
 
           return (
             <div key={`overlay-${dayIdx}`} style={{
@@ -1810,6 +1854,35 @@ function WeeklyPlanner() {
               position: 'relative',
               zIndex: 2,
             }}>
+              {/* Deadline markers at top of day */}
+              {dayDeadlineMarkers.map((dl, dlIdx) => (
+                <div key={`dl-${dlIdx}`} style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 2,
+                  right: 2,
+                  height: Math.max(16, dayDeadlineMarkers.length > 1 ? 14 : 18),
+                  marginTop: dlIdx * 16,
+                  background: 'rgba(239,68,68,0.15)',
+                  borderLeft: `3px solid ${dl.certColor || BLOCK_COLORS.deadline}`,
+                  borderRadius: 3,
+                  padding: '1px 4px',
+                  fontSize: 9,
+                  fontWeight: 600,
+                  color: dl.certColor || BLOCK_COLORS.deadline,
+                  overflow: 'hidden',
+                  whiteSpace: 'nowrap',
+                  textOverflow: 'ellipsis',
+                  zIndex: 3,
+                  display: 'flex',
+                  alignItems: 'center',
+                  boxSizing: 'border-box',
+                }}
+                title={dl.label}
+                >
+                  {dl.label}
+                </div>
+              ))}
               {/* Blocks */}
               {dayBlocks.map((block, idx) => {
                 const color = BLOCK_COLORS[block.type] || '#3F3F46'
