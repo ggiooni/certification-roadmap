@@ -17,18 +17,40 @@ An interactive React app to track my AI Automation Engineer certification path. 
 3. **Microsoft PL-500: Power Automate RPA Developer** — Dec 2026–Mar 2027, ~€150 exam
 
 ## Tech stack
-- React 18 + Vite
-- localStorage for persistence (runs locally on my machine)
-- Google Calendar API integration (to be added — for study alerts)
+- React 18 + Vite, deployed on Vercel
+- localStorage for persistence (planner data, progress)
+- Vercel KV for server-side storage (Google OAuth refresh token)
+- Serverless API functions (`/api/*`) for Google Calendar sync
+- Google Calendar auto-sync via server-side OAuth (refresh token in KV)
 
-## Key features to build/improve
-- Checklist with persistence (done — needs polish)
-- Google Calendar API integration for automatic study block reminders
-- Notes system per task
-- Export/import progress
-- Dashboard with stats (hours studied, completion %, streaks)
-- Maybe: Pomodoro timer for study sessions
-- Maybe: Connection to my actual Google Calendar via OAuth
+## Architecture
+```
+[React App]  <-->  [/api/* serverless]  <-->  [Google Calendar API]
+     |                    |
+localStorage         Vercel KV
+```
+
+### API Endpoints
+- `GET /api/status` — health check + GCal connection status
+- `GET /api/gcal/auth?action=login` — start OAuth flow
+- `GET /api/gcal/auth?code=...` — OAuth callback
+- `POST /api/gcal/sync` — sync blocks to Google Calendar
+- `GET/POST/DELETE /api/events` — CRUD for planner events (API key auth)
+
+### Environment Variables (Vercel)
+- `GOOGLE_CLIENT_ID` — OAuth client ID
+- `GOOGLE_CLIENT_SECRET` — OAuth client secret
+- `GCAL_CALENDAR_ID` — target calendar (defaults to hardcoded)
+- `API_KEY` — for external API access (Claude Code, scripts)
+- `KV_REST_API_URL` + `KV_REST_API_TOKEN` — auto-set by Vercel KV
+
+## Key features
+- Certification checklist with progress tracking, notes, streaks
+- Weekly planner with visual grid (7 days x 16 hours)
+- Google Calendar auto-sync (2s debounce after block changes)
+- REST API for external tools (Claude Code, scripts)
+- ICS import from Moodle
+- Export/import progress as JSON
 
 ## Code style
 - Single-file React components are fine for now

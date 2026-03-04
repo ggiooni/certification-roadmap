@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { checkGCalAuth, getAuthUrl, disconnectGCal, syncToGCal, debouncedSync, cancelPendingSync } from './syncService.js'
 
 // ── Certification data ──────────────────────────────────────────────
 const CERTIFICATIONS = [
@@ -404,40 +405,7 @@ function layoutDayBlocks(blocks) {
 }
 
 // ── Google Calendar Config ─────────────────────────────────────────
-const GCAL_SCOPES = 'https://www.googleapis.com/auth/calendar.events'
-const GCAL_DISCOVERY = 'https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest'
-const GCAL_CALENDAR_ID = 'e5e04e99051b8a3cf2cd0100cc98abbd59ebbdf8b4b5fe9011f3d848ca7b50e7@group.calendar.google.com'
-const GCAL_CREDS_KEY = 'cert-roadmap-gcal-creds'
-
-// Reminder config per block type (minutes before)
-const GCAL_REMINDERS = {
-  class: [{ method: 'popup', minutes: 30 }],
-  sport: [{ method: 'popup', minutes: 60 }, { method: 'popup', minutes: 10 }],
-  work: [{ method: 'popup', minutes: 15 }],
-  study: [{ method: 'popup', minutes: 30 }],
-  custom: [{ method: 'popup', minutes: 15 }],
-}
-
-// Google Calendar color IDs (1-11)
-const GCAL_COLOR_MAP = {
-  class: '9',    // Blueberry
-  sport: '10',   // Basil (green)
-  work: '5',     // Banana (yellow)
-  study: '3',    // Grape (purple)
-  custom: '4',   // Flamingo (pink)
-}
-
-function loadGCalCreds() {
-  try {
-    const raw = localStorage.getItem(GCAL_CREDS_KEY)
-    if (!raw) return { clientId: '', apiKey: '' }
-    return JSON.parse(raw)
-  } catch { return { clientId: '', apiKey: '' } }
-}
-
-function saveGCalCreds(creds) {
-  localStorage.setItem(GCAL_CREDS_KEY, JSON.stringify(creds))
-}
+// GCal config moved to server-side (api/gcal/sync.js)
 
 // ── Styles ──────────────────────────────────────────────────────────
 const S = {
@@ -864,258 +832,124 @@ function Timeline({ checked }) {
   )
 }
 
-// ── Google Calendar Sync Component ─────────────────────────────────
+// ── Google Calendar Sync Component (Server-side via Vercel) ────────
 
 function GoogleCalendarSync({ allBlocks, weekDates, weekKey }) {
-  const [creds, setCreds] = useState(loadGCalCreds)
-  const [gapiReady, setGapiReady] = useState(false)
-  const [isAuthorized, setIsAuthorized] = useState(false)
-  const [tokenClient, setTokenClient] = useState(null)
-  const [syncStatus, setSyncStatus] = useState(null) // null | 'syncing' | { created: N } | { error: msg }
-  const [showSetup, setShowSetup] = useState(false)
+  const [isConnected, setIsConnected] = useState(false)
+  const [autoSync, setAutoSync] = useState(() => localStorage.getItem('cert-roadmap-autosync') !== 'false')
+  const [syncStatus, setSyncStatus] = useState(null) // null | 'syncing' | 'auto-syncing' | { created, deleted } | { error }
+  const [checking, setChecking] = useState(true)
 
-  const hasCredentials = creds.clientId && creds.apiKey
-
-  // Init gapi + GIS when credentials are set
+  // Check connection status on mount and after OAuth redirect
   useEffect(() => {
-    if (!hasCredentials) return
-
-    let cancelled = false
-
-    const initGapi = () => {
-      if (!window.gapi) {
-        setTimeout(initGapi, 200)
-        return
-      }
-      window.gapi.load('client', async () => {
-        try {
-          await window.gapi.client.init({
-            apiKey: creds.apiKey,
-            discoveryDocs: [GCAL_DISCOVERY],
-          })
-          if (!cancelled) setGapiReady(true)
-        } catch (err) {
-          console.error('gapi init error:', err)
-        }
-      })
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('gcal_auth') === 'success') {
+      window.history.replaceState({}, '', window.location.pathname)
     }
 
-    const initGis = () => {
-      if (!window.google?.accounts?.oauth2) {
-        setTimeout(initGis, 200)
-        return
-      }
-      const tc = window.google.accounts.oauth2.initTokenClient({
-        client_id: creds.clientId,
-        scope: GCAL_SCOPES,
-        callback: (response) => {
-          if (response.error) {
-            console.error('OAuth error:', response)
-            return
-          }
-          setIsAuthorized(true)
-        },
-      })
-      if (!cancelled) setTokenClient(tc)
-    }
+    checkGCalAuth().then(res => {
+      setIsConnected(res.connected)
+      setChecking(false)
+    })
+  }, [])
 
-    initGapi()
-    initGis()
+  // Auto-sync when blocks change (debounced 2s)
+  useEffect(() => {
+    if (!isConnected || !autoSync) return
 
-    return () => { cancelled = true }
-  }, [hasCredentials, creds.clientId, creds.apiKey])
+    setSyncStatus('auto-syncing')
+    debouncedSync(allBlocks, weekDates, (result) => {
+      setSyncStatus(result)
+    })
 
-  const handleAuth = () => {
-    if (!tokenClient) return
-    tokenClient.requestAccessToken()
-  }
+    return () => cancelPendingSync()
+  }, [isConnected, autoSync, allBlocks, weekDates])
 
-  const handleDisconnect = () => {
-    const token = window.gapi.client.getToken()
-    if (token) {
-      window.google.accounts.oauth2.revoke(token.access_token)
-      window.gapi.client.setToken(null)
-    }
-    setIsAuthorized(false)
-  }
-
-  const handleSync = async () => {
-    if (!gapiReady || !isAuthorized) return
+  const handleManualSync = async () => {
+    if (!isConnected) return
     setSyncStatus('syncing')
-
     try {
-      // Get existing events for this week to avoid duplicates
-      const weekStart = new Date(weekDates[0])
-      weekStart.setHours(0, 0, 0, 0)
-      const weekEnd = new Date(weekDates[6])
-      weekEnd.setHours(23, 59, 59, 999)
-
-      const existingResponse = await window.gapi.client.calendar.events.list({
-        calendarId: GCAL_CALENDAR_ID,
-        timeMin: weekStart.toISOString(),
-        timeMax: weekEnd.toISOString(),
-        maxResults: 250,
-        singleEvents: true,
-      })
-      const existingEvents = existingResponse.result.items || []
-
-      let created = 0
-      let skipped = 0
-      for (const block of allBlocks) {
-        const date = weekDates[block.day]
-        if (!date) continue
-
-        const startHour = Math.floor(block.start)
-        const startMin = Math.round((block.start - startHour) * 60)
-        const endHour = Math.floor(block.end)
-        const endMin = Math.round((block.end - endHour) * 60)
-
-        const startDt = new Date(date)
-        startDt.setHours(startHour, startMin, 0, 0)
-        const endDt = new Date(date)
-        endDt.setHours(endHour, endMin, 0, 0)
-
-        // Check if event already exists (same summary and start time)
-        const isDuplicate = existingEvents.some(ev =>
-          ev.summary === block.label &&
-          ev.start?.dateTime &&
-          new Date(ev.start.dateTime).getTime() === startDt.getTime()
-        )
-
-        if (isDuplicate) {
-          skipped++
-          continue
-        }
-
-        const event = {
-          summary: block.label,
-          start: {
-            dateTime: startDt.toISOString(),
-            timeZone: 'Europe/Dublin',
-          },
-          end: {
-            dateTime: endDt.toISOString(),
-            timeZone: 'Europe/Dublin',
-          },
-          reminders: {
-            useDefault: false,
-            overrides: GCAL_REMINDERS[block.type] || [{ method: 'popup', minutes: 30 }],
-          },
-          colorId: GCAL_COLOR_MAP[block.type] || '1',
-        }
-
-        await window.gapi.client.calendar.events.insert({
-          calendarId: GCAL_CALENDAR_ID,
-          resource: event,
-        })
-        created++
-      }
-      setSyncStatus({ created, skipped })
+      const result = await syncToGCal(allBlocks, weekDates)
+      setSyncStatus(result)
     } catch (err) {
-      console.error('Sync error:', err)
-      const msg = err?.result?.error?.message || err.message || 'Error desconocido'
-      setSyncStatus({ error: msg })
+      setSyncStatus({ error: err.message })
     }
   }
 
-  const updateCred = (key, value) => {
-    const updated = { ...creds, [key]: value }
-    setCreds(updated)
-    saveGCalCreds(updated)
+  const handleDisconnect = async () => {
+    await disconnectGCal()
+    setIsConnected(false)
+    setSyncStatus(null)
   }
 
-  // Setup instructions panel
-  if (!hasCredentials) {
+  const toggleAutoSync = () => {
+    const next = !autoSync
+    setAutoSync(next)
+    localStorage.setItem('cert-roadmap-autosync', String(next))
+  }
+
+  const boxStyle = {
+    background: '#18181B',
+    border: '1px solid #27272A',
+    borderRadius: 10,
+    padding: '14px 16px',
+    marginBottom: 16,
+    borderLeft: `3px solid ${isConnected ? '#22C55E' : '#3B82F6'}`,
+  }
+
+  if (checking) {
     return (
-      <div style={{
-        background: '#18181B',
-        border: '1px solid #27272A',
-        borderRadius: 10,
-        padding: '14px 16px',
-        marginBottom: 16,
-        borderLeft: '3px solid #3B82F6',
-      }}>
-        <div
-          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer' }}
-          onClick={() => setShowSetup(!showSetup)}
-        >
-          <span style={{ fontSize: 14, fontWeight: 600, color: '#FAFAFA' }}>
-            Google Calendar — Configurar
-          </span>
-          <span style={{ fontSize: 12, color: '#71717A' }}>{showSetup ? '▲' : '▼'}</span>
-        </div>
-        {showSetup && (
-          <div style={{ marginTop: 12 }}>
-            <ol style={{ fontSize: 12, color: '#A1A1AA', paddingLeft: 20, margin: '0 0 12px', lineHeight: 1.8 }}>
-              <li>Ir a <a href="https://console.cloud.google.com" target="_blank" rel="noreferrer" style={{ color: '#3B82F6' }}>Google Cloud Console</a></li>
-              <li>Crear un proyecto nuevo (o usar uno existente)</li>
-              <li>Habilitar <strong>Google Calendar API</strong> en APIs & Services</li>
-              <li>Crear <strong>OAuth 2.0 Client ID</strong> (Web app, origin: <code style={{ background: '#27272A', padding: '1px 4px', borderRadius: 3 }}>http://localhost:5173</code>)</li>
-              <li>Crear <strong>API Key</strong> en Credentials</li>
-              <li>Pegar ambos abajo:</li>
-            </ol>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <input
-                placeholder="Client ID (ej: 123...apps.googleusercontent.com)"
-                value={creds.clientId}
-                onChange={(e) => updateCred('clientId', e.target.value.trim())}
-                style={{
-                  background: '#0F0F11', border: '1px solid #27272A', borderRadius: 6,
-                  color: '#FAFAFA', fontSize: 12, padding: '8px 10px', outline: 'none', width: '100%',
-                  boxSizing: 'border-box',
-                }}
-              />
-              <input
-                placeholder="API Key (ej: AIza...)"
-                value={creds.apiKey}
-                onChange={(e) => updateCred('apiKey', e.target.value.trim())}
-                style={{
-                  background: '#0F0F11', border: '1px solid #27272A', borderRadius: 6,
-                  color: '#FAFAFA', fontSize: 12, padding: '8px 10px', outline: 'none', width: '100%',
-                  boxSizing: 'border-box',
-                }}
-              />
-            </div>
-          </div>
-        )}
+      <div style={boxStyle}>
+        <span style={{ fontSize: 14, color: '#71717A' }}>Verificando Google Calendar...</span>
       </div>
     )
   }
 
-  // Authorized / sync UI
   return (
-    <div style={{
-      background: '#18181B',
-      border: '1px solid #27272A',
-      borderRadius: 10,
-      padding: '14px 16px',
-      marginBottom: 16,
-      borderLeft: '3px solid #3B82F6',
-    }}>
+    <div style={boxStyle}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-        <span style={{ fontSize: 14, fontWeight: 600, color: '#FAFAFA' }}>
-          Google Calendar
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 14, fontWeight: 600, color: '#FAFAFA' }}>
+            Google Calendar
+          </span>
+          {isConnected && (
+            <span style={{ fontSize: 11, color: '#22C55E', background: 'rgba(34,197,94,0.1)', padding: '2px 8px', borderRadius: 10 }}>
+              Conectado
+            </span>
+          )}
+          {isConnected && autoSync && (
+            <span style={{ fontSize: 11, color: '#3B82F6', background: 'rgba(59,130,246,0.1)', padding: '2px 8px', borderRadius: 10 }}>
+              Auto-sync ON
+            </span>
+          )}
+        </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {!isAuthorized ? (
-            <button
+          {!isConnected ? (
+            <a
+              href={getAuthUrl()}
               style={{
                 ...S.btn('#3B82F6', '#fff'),
-                opacity: gapiReady ? 1 : 0.5,
+                textDecoration: 'none',
+                display: 'inline-block',
               }}
-              onClick={handleAuth}
-              disabled={!gapiReady}
             >
-              {gapiReady ? 'Conectar con Google' : 'Cargando...'}
-            </button>
+              Conectar con Google
+            </a>
           ) : (
             <>
               <button
+                style={S.btn(autoSync ? '#27272A' : '#3B82F6', autoSync ? '#71717A' : '#fff')}
+                onClick={toggleAutoSync}
+                title={autoSync ? 'Desactivar auto-sync' : 'Activar auto-sync'}
+              >
+                {autoSync ? 'Auto-sync OFF' : 'Auto-sync ON'}
+              </button>
+              <button
                 style={S.btn('#22C55E', '#000')}
-                onClick={handleSync}
+                onClick={handleManualSync}
                 disabled={syncStatus === 'syncing'}
               >
-                {syncStatus === 'syncing' ? 'Sincronizando...' : `Sincronizar semana (${allBlocks.length} bloques)`}
+                {syncStatus === 'syncing' ? 'Sincronizando...' : `Sync (${allBlocks.length})`}
               </button>
               <button
                 style={S.btn('#27272A', '#71717A')}
@@ -1125,23 +959,10 @@ function GoogleCalendarSync({ allBlocks, weekDates, weekKey }) {
               </button>
             </>
           )}
-          <button
-            style={S.btn('#27272A', '#71717A')}
-            onClick={() => {
-              if (confirm('¿Borrar credenciales de Google Calendar?')) {
-                updateCred('clientId', '')
-                updateCred('apiKey', '')
-                setIsAuthorized(false)
-              }
-            }}
-            title="Cambiar credenciales"
-          >
-            ⚙
-          </button>
         </div>
       </div>
       {/* Status messages */}
-      {syncStatus && syncStatus !== 'syncing' && (
+      {syncStatus && syncStatus !== 'syncing' && syncStatus !== 'auto-syncing' && (
         <div style={{
           marginTop: 8,
           fontSize: 12,
@@ -1153,7 +974,12 @@ function GoogleCalendarSync({ allBlocks, weekDates, weekKey }) {
         }}>
           {syncStatus.error
             ? `Error: ${syncStatus.error}`
-            : `${syncStatus.created} evento${syncStatus.created !== 1 ? 's' : ''} creado${syncStatus.created !== 1 ? 's' : ''}${syncStatus.skipped ? `, ${syncStatus.skipped} ya existía${syncStatus.skipped !== 1 ? 'n' : ''}` : ''}`}
+            : `${syncStatus.created || 0} creado${(syncStatus.created || 0) !== 1 ? 's' : ''}, ${syncStatus.deleted || 0} eliminado${(syncStatus.deleted || 0) !== 1 ? 's' : ''}`}
+        </div>
+      )}
+      {syncStatus === 'auto-syncing' && (
+        <div style={{ marginTop: 8, fontSize: 11, color: '#71717A' }}>
+          Sincronizando automaticamente...
         </div>
       )}
     </div>
